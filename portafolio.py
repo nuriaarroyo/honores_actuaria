@@ -3,33 +3,91 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import seaborn as sns
 from pathlib import Path
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import squareform
 
 
 class Portafolio:
-    def __init__(self, data: pd.DataFrame, nombre: str = "Portafolio"):  #df
-        self.data = data.copy()
+    def __init__(self, data: pd.DataFrame, nombre: str = "Portafolio"):  
+            
+        """
+        Inicializa un portafolio con datos de precios en formato MultiIndex por columnas:
+        nivel 0 = ticker (activo), nivel 1 = campo (por ej. 'Close', 'Open', ...).
+
+        Parámetros
+        ----------
+        data : pd.DataFrame
+            DataFrame con columnas MultiIndex (ticker, campo) y un índice de fechas.
+            Debe contener al menos el campo 'Close' para cada ticker.
+        nombre : str
+            Nombre legible del portafolio (para títulos de gráficas y exportes).
+
+        Efectos
+        -------
+        - Crea una copia defensiva de `data`.
+        - Valida estructura mínima (MultiIndex de 2 niveles y presencia de 'Close').
+        - Inicializa atributos públicos y privados usados por otros métodos.
+        """
+        # copia y validación de la estructura 
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError("`data` debe ser un pandas.DataFrame.")
+        data = data.copy()
+
+        if not isinstance(data.columns, pd.MultiIndex) or data.columns.nlevels != 2:
+         raise ValueError(
+            "Las columnas deben ser MultiIndex de 2 niveles: (ticker, campo)."
+        )
+
+        lvl0, lvl1 = data.columns.levels[0], data.columns.levels[1]
+        if "Close" not in data.columns.get_level_values(1):
+            raise ValueError(
+            "Falta el campo 'Close' en el segundo nivel de columnas."
+        )
+        # elementos 
+        self.data: pd.DataFrame = data
         self.nombre = nombre
-        self.weights = None
-        self.expected_returns = None
-        self.volatility = None
-        self.portfolioreturns = None
+        # Pesos y métricas (se rellenan tras `construir` o `dividir`)
+        self.weights: np.ndarray | None = None
+        self.expected_returns: pd.Series | None = None
+        self.volatility: pd.Series | None = None
+        self.portfolioreturns: pd.Series | None = None
+
+        # sets de datos 
+        self.data_construct: pd.DataFrame | None = None
+        self.data_bt_train: pd.DataFrame | None = None
+        self.data_bt_test: pd.DataFrame | None = None
+
+        # universo base para construcción (para alinear pesos)
+        self._construct_tickers: list[str] | None = None
         
     def dividir(self,
-                start_train_date: str, end_train_date: str, #train data 
-                start_bt_date: str, end_bt_date: str ): #backtesting data
-        # loc
-        self.data_train = self.data.loc[start_train_date:end_train_date]
-        self.data_bt = self.data.loc[start_bt_date:end_bt_date]
+                construct_start: str, construct_end: str,
+                bt_train_start: str, bt_train_end: str,
+                bt_test_start: str, bt_test_end: str):
+        """
+        Define tres tramos:
+        - data_construct: para construir el portafolio final (entrenamiento definitivo)
+        - data_bt_train: para calibración/validación interna (backtest-train)
+        - data_bt_test: para prueba final fuera de muestra (backtest-test)
+        """
+        # 1) cortes por fecha
+        self.data_construct = self.data.loc[construct_start:construct_end]
+        self.data_bt_train = self.data.loc[bt_train_start:bt_train_end]
+        self.data_bt_test  = self.data.loc[bt_test_start:bt_test_end] 
         
-        # Calcular retornos esperados y volatilidad del período de entrenamiento
-        self.expected_returns = self.calculate_expected_returns(self.data_train)
-        self.volatility = self.calculate_volatility(self.data_train)
-        
-        return self.data_train
+        # 2) universo de construcción (tickers) y orden canónico
+        self._construct_tickers = (
+            self.data_construct.columns.get_level_values(0).unique().tolist()
+        )
+        # 3) métricas (sobre el set de construcción)
+        self.expected_returns = self.calculate_expected_returns(self.data_construct)
+        self.volatility = self.calculate_volatility(self.data_construct)
+        # tmabién para bt_train
+        self.expected_returns_bt = self.calculate_expected_returns(self.data_bt_train)
+        self.volatility_bt = self.calculate_volatility(self.data_bt_train)
+
+        return self.data_construct, self.data_bt_train, self.data_bt_test
 
     def calculate_expected_returns(self, data):
         closeprices = data.xs('Close', axis=1, level=1)

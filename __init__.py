@@ -6,7 +6,7 @@ Esta librería implementa diferentes estrategias de construcción de portafolios
 - Markowitz (Optimización de Sharpe)
 - HRP (Hierarchical Risk Parity)
 
-Autor: [Tu Nombre]
+Autor: Nuria Arroyo Bustamante 
 """
 
 from .portafolio import Portafolio
@@ -18,7 +18,7 @@ from .clustering import Clustering, SingleLinkage
 from .allocation import Allocation, Naiverp
 
 __version__ = "1.0.0"
-__author__ = "[Tu Nombre]"
+__author__ = "Nuria Arroyo"
 
 __all__ = [
     'Portafolio',
