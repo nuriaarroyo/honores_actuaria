@@ -310,8 +310,282 @@ class Portafolio:
             vol *= np.sqrt(freq)
         return float(vol)
 
+    def bt_train(self, pesos):
+        """
+        Evalúa los mismos pesos del portafolio en la ventana BT-TRAIN.
+        Devuelve la SERIE de retornos del portafolio en ese tramo.
+        """
+        if self.data_bt_train is None or self.data_bt_train.empty:
+            print("Advertencia: la ventana de BT‑train está vacía; se omite evaluación.")
+            return None
+
+        close_bt = self.data_bt_train.xs('Close', axis=1, level=1)
+
+        # Alinear al universo de construcción
+        construct_tickers = self._construct_tickers or []
+        cols = [c for c in close_bt.columns if c in construct_tickers]
+        if not cols:
+            print("BT‑train no comparte activos con construcción.")
+            return None
+
+        # Reindexar/renormalizar pesos si faltan activos
+        idx = [construct_tickers.index(c) for c in cols]
+        w = np.asarray(pesos, dtype=float)[idx]
+        s = w.sum()
+        if s == 0:
+            print("Pesos nulos tras filtrar columnas en BT‑train.")
+            return None
+        w = w / s
+
+        rs = close_bt.loc[:, cols].pct_change().dropna() @ w
+        return rs
 
 
+    def bt_test(self, pesos):
+        """
+        Evalúa los mismos pesos del portafolio en la ventana BT-TEST.
+        Devuelve la SERIE de retornos del portafolio en ese tramo.
+        """
+        if self.data_bt_test is None or self.data_bt_test.empty:
+            print("Advertencia: la ventana de BT‑test está vacía; se omite evaluación.")
+            return None
+
+        close_bt = self.data_bt_test.xs('Close', axis=1, level=1)
+
+        construct_tickers = self._construct_tickers or []
+        cols = [c for c in close_bt.columns if c in construct_tickers]
+        if not cols:
+            print("BT‑test no comparte activos con construcción.")
+            return None
+
+        idx = [construct_tickers.index(c) for c in cols]
+        w = np.asarray(pesos, dtype=float)[idx]
+        s = w.sum()
+        if s == 0:
+            print("Pesos nulos tras filtrar columnas en BT‑test.")
+            return None
+        w = w / s
+
+        rs = close_bt.loc[:, cols].pct_change().dropna() @ w
+        return rs
+
+    def mostrar_pesos(self, pesos=None, top: int | None = None, as_dataframe: bool = False, decimals: int = 4):
+        """
+        Imprime (y opcionalmente devuelve) los pesos del portafolio alineados al
+        universo de CONSTRUCCIÓN (`self._construct_tickers`).
+
+        Parámetros
+        ----------
+        pesos : array-like | pd.Series | None
+            - None: usa `self.weights` ya fijados por `construir(...)`.
+            - array-like: se asume el orden de `self._construct_tickers`.
+            - pd.Series: debe estar indexada por ticker; se reindexa a construcción.
+        top : int | None
+            Si se indica, muestra solo los 'top' mayores pesos (orden descendente).
+        as_dataframe : bool
+            Si True, devuelve un DataFrame con columnas ['ticker','weight','pct'].
+        decimals : int
+            Decimales para impresión del peso en formato flotante.
+
+        Returns
+        -------
+        None | pd.DataFrame
+            Devuelve DataFrame si `as_dataframe=True`.
+        """
+        # --- definir universo de construcción ---
+        construct_tickers = self._construct_tickers or []
+        if not construct_tickers:
+            print("No hay universo de construcción definido. Llama primero a dividir(...).")
+            return None
+
+        # --- obtener/alinéar pesos ---
+        if pesos is None:
+            if getattr(self, "weights", None) is None:
+                print("No hay pesos en el objeto. Pasa 'pesos' o llama a construir(...).")
+                return None
+            w = np.asarray(self.weights, dtype=float)
+            if len(w) != len(construct_tickers):
+                print("Los pesos guardados no coinciden con el universo de construcción.")
+                return None
+            tickers = construct_tickers
+        elif isinstance(pesos, pd.Series):
+            s = pesos.reindex(construct_tickers)
+            if s.isna().any():
+                faltan = [t for t, v in s.items() if pd.isna(v)]
+                raise ValueError(f"Faltan pesos para tickers de construcción: {faltan}")
+            w = s.values.astype(float)
+            tickers = construct_tickers
+        else:
+            w = np.asarray(pesos, dtype=float)
+            if len(w) != len(construct_tickers):
+                raise ValueError(
+                    f"Length of weights ({len(w)}) debe coincidir con activos de construcción ({len(construct_tickers)})."
+                )
+            tickers = construct_tickers
+
+        # --- limpieza numérica y normalización suave ---
+        if not np.isfinite(w).all():
+            raise ValueError("Los pesos contienen NaN o Inf.")
+        w[w < 0] = np.maximum(w[w < 0], -1e-12)  # clamp negativos mínimos
+        ssum = w.sum()
+        if ssum == 0:
+            raise ValueError("Suma de pesos = 0; no se puede normalizar.")
+        if not np.isclose(ssum, 1.0, atol=1e-8):
+            w = w / ssum
+
+        # --- armar tabla ordenada por peso desc. ---
+        df = pd.DataFrame({"ticker": tickers, "weight": w})
+        df["pct"] = (df["weight"] * 100).round(2)
+        df = df.sort_values("weight", ascending=False, kind="mergesort").reset_index(drop=True)
+
+        if isinstance(top, int) and top > 0:
+            df_print = df.head(top)
+        else:
+            df_print = df
+
+        # --- salida en texto ---
+        for _, row in df_print.iterrows():
+            print(f"acción: {row['ticker']}, peso asignado: {row['weight']:.{decimals}f}  ({row['pct']:.2f}%)")
+
+        if top and top < len(df):
+            resto = len(df) - top
+            pct_resto = df["pct"].iloc[top:].sum()
+            print(f"... y {resto} activos más sumando {pct_resto:.2f}%")
+
+        return df if as_dataframe else None
+
+    def pastel(self, pesos=None, min_weight: float = 1e-3):
+        """
+        Grafica un pastel (donut) de los pesos de CONSTRUCCIÓN.
+        - Acepta pesos explícitos (array o Series) o usa self.weights si ya construiste.
+        - Alinea a self._construct_tickers y rellena faltantes con 0 (p. ej., Markowitz).
+        - Filtra pesos muy pequeños para legibilidad (min_weight).
+        - Guarda el HTML en ./plots/ y también lo muestra en el navegador.
+        """
+        # --- universo de construcción ---
+        construct_tickers = self._construct_tickers or []
+        if not construct_tickers:
+            print("No hay universo de construcción. Llama primero a dividir(...).")
+            return
+
+        # --- obtener / alinear pesos ---
+        if pesos is None:
+            if getattr(self, "weights", None) is None:
+                print("No hay pesos en el objeto. Pasa 'pesos' o llama a construir(...).")
+                return
+            w = np.asarray(self.weights, dtype=float)
+            if len(w) != len(construct_tickers):
+                print("Los pesos guardados no coinciden con el universo de construcción.")
+                return
+            tickers = construct_tickers
+        elif isinstance(pesos, pd.Series):
+            # reindex a universo de construcción; faltantes = 0 (caso Markowitz)
+            s = pesos.reindex(construct_tickers).fillna(0.0)
+            w = s.values.astype(float)
+            tickers = construct_tickers
+        else:
+            w = np.asarray(pesos, dtype=float)
+            if len(w) != len(construct_tickers):
+                raise ValueError(
+                    f"Length of weights ({len(w)}) debe coincidir con activos de construcción ({len(construct_tickers)})."
+                )
+            tickers = construct_tickers
+
+        # limpieza y normalización suave
+        if not np.isfinite(w).all():
+            raise ValueError("Los pesos contienen NaN o Inf.")
+        w[w < 0] = np.maximum(w[w < 0], -1e-12)
+        ssum = w.sum()
+        if ssum == 0:
+            print("Suma de pesos = 0; nada que graficar.")
+            return
+        if not np.isclose(ssum, 1.0, atol=1e-8):
+            w = w / ssum
+
+        # filtrar pesos pequeños para legibilidad
+        mask = w > min_weight
+        pesos_filtrados = w[mask].tolist()
+        tickers_filtrados = [t for t, m in zip(tickers, mask) if m]
+
+        # tamaños y texto según número de activos
+        n_activos = len(tickers)
+        if n_activos <= 20:
+            width, height = 1200, 800
+            text_size = 12; legend_size = 10
+        elif n_activos <= 40:
+            width, height = 1400, 900
+            text_size = 11; legend_size = 9
+        else:
+            width, height = 1600, 1000
+            text_size = 10; legend_size = 8
+
+        # detectar equiponderado (naive) aproximado
+        es_naive = False
+        if len(pesos_filtrados) > 0:
+            p = np.array(pesos_filtrados, dtype=float)
+            # coeficiente de variación bajo → casi iguales
+            if p.mean() > 0 and (p.std() / p.mean()) < 0.02 and len(p) > 10:
+                es_naive = True
+
+        # ajustar agujero
+        if len(pesos_filtrados) < len(tickers) * 0.5:
+            hole_size = 0.1
+        elif es_naive:
+            hole_size = 0.2
+        else:
+            hole_size = 0.3
+
+        # colores / pull
+        if es_naive:
+            base_colors = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd']
+            reps = (len(tickers_filtrados) // len(base_colors)) + 1
+            colors = (base_colors * reps)[:len(tickers_filtrados)]
+            pull_effect = [0.05] * len(tickers_filtrados)
+        else:
+            colors = None
+            pull_effect = [0.1 if p > 0.05 else 0 for p in pesos_filtrados]
+
+        fig = go.Figure(data=[go.Pie(
+            labels=tickers_filtrados,
+            values=pesos_filtrados,
+            hole=hole_size,
+            textinfo='label+percent',
+            textposition='outside',
+            textfont=dict(size=text_size),
+            marker=dict(line=dict(color='white', width=1), colors=colors),
+            rotation=45,
+            pull=pull_effect
+        )])
+
+        # título
+        activos_excluidos = len(tickers) - len(tickers_filtrados)
+        if activos_excluidos > 0:
+            title_text = (f'Pesos del {self.nombre}'
+                        f'<br><sub>Se muestran {len(tickers_filtrados)} de {len(tickers)} activos '
+                        f'(excluidos {activos_excluidos} con peso ≤ {min_weight:.2%})</sub>')
+        elif es_naive and pesos_filtrados:
+            title_text = (f'Pesos del {self.nombre}'
+                        f'<br><sub>Portfolio equiponderado: {len(tickers_filtrados)} activos '
+                        f'≈ {pesos_filtrados[0]:.1%} cada uno</sub>')
+        else:
+            title_text = f'Pesos del {self.nombre}'
+
+        fig.update_layout(
+            title=title_text, showlegend=True, width=width, height=height,
+            title_font_size=20, font=dict(size=legend_size),
+            margin=dict(l=50, r=50, t=100, b=50),
+            plot_bgcolor='white', paper_bgcolor='white',
+            legend=dict(orientation="v", yanchor="top", y=0.99,
+                        xanchor="left", x=1.02, font=dict(size=legend_size))
+        )
+
+        # guardar en ./plots y mostrar
+        safe_name = self.nombre.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
+        plots_dir = Path.cwd() / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'portfolio_pastel_{safe_name}.html'
+        fig.write_html(str(out_path))
+        fig.show()
 
     def mc(self,pesos):
         closeprices = self.data.xs('Close', axis=1, level=1)
@@ -363,117 +637,9 @@ class Portafolio:
     def risk(self,pesos):
         pass
 
-    def mostrar_pesos(self,pesos):
-        tickers = self.data.columns.get_level_values(0).unique().to_list()
-        for ticker, peso in zip(tickers, pesos):
-            print(f"acción: {ticker}, peso asignado: {peso:.4f}")
-        pass
     
-    def pastel(self,pesos):
-        tickers = self.data.columns.get_level_values(0).unique().to_list()
-        n_activos = len(tickers)
-        
-        # Ajustar tamaño del gráfico según número de activos
-        if n_activos <= 20:
-            width, height = 1200, 800
-            text_size = 12
-            legend_size = 10
-        elif n_activos <= 40:
-            width, height = 1400, 900
-            text_size = 11
-            legend_size = 9
-        else:
-            width, height = 1600, 1000
-            text_size = 10
-            legend_size = 8
-        
-        # Crear gráfico de pastel con Plotly
-        # Filtrar solo activos con peso > 0 para mejor visualización
-        pesos_filtrados = []
-        tickers_filtrados = []
-        
-        for ticker, peso in zip(tickers, pesos):
-            if peso > 0.001:  # Solo activos con peso > 0.1%
-                pesos_filtrados.append(peso)
-                tickers_filtrados.append(ticker)
-        
-        # Detectar si es un portfolio tipo Naive (todos con peso similar)
-        pesos_unicos = set([round(p, 4) for p in pesos_filtrados])
-        es_naive = len(pesos_unicos) == 1 and len(pesos_filtrados) > 20
-        
-        # Si hay muchos activos con peso 0, ajustar el agujero central
-        if len(pesos_filtrados) < len(tickers) * 0.5:
-            hole_size = 0.1  # Agujero más pequeño para mejor visualización
-        elif es_naive:
-            hole_size = 0.2  # Agujero intermedio para portfolios muy diversificados
-        else:
-            hole_size = 0.3
-        
-        # Configurar colores y efectos especiales para portfolios Naive
-        if es_naive:
-            # Para portfolios equiponderados, usar colores alternados para mejor distinción
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'] * (len(tickers_filtrados) // 5 + 1)
-            colors = colors[:len(tickers_filtrados)]
-            pull_effect = [0.05] * len(tickers_filtrados)  # Ligero efecto pull para todos
-        else:
-            colors = None  # Usar colores por defecto
-            pull_effect = [0.1 if p > 0.05 else 0 for p in pesos_filtrados]  # Destacar activos importantes
-        
-        fig = go.Figure(data=[go.Pie(
-            labels=tickers_filtrados,
-            values=pesos_filtrados,
-            hole=hole_size,
-            textinfo='label+percent',
-            textposition='outside',
-            textfont=dict(size=text_size),
-            marker=dict(
-                line=dict(color='white', width=1),
-                colors=colors
-            ),
-            rotation=45,  # Rotar para mejor distribución
-            pull=pull_effect
-        )])
-        
-        # Crear título con información sobre activos excluidos
-        activos_excluidos = len(tickers) - len(tickers_filtrados)
-        if activos_excluidos > 0:
-            title_text = f'Pesos del {self.nombre}<br><sub>Se muestran {len(tickers_filtrados)} de {len(tickers)} activos (excluidos {activos_excluidos} con peso ≤ 0.1%)</sub>'
-        elif es_naive:
-            peso_uniforme = pesos_filtrados[0] if pesos_filtrados else 0
-            title_text = f'Pesos del {self.nombre}<br><sub>Portfolio Equiponderado: {len(tickers_filtrados)} activos con peso uniforme de {peso_uniforme:.1%} cada uno</sub>'
-        else:
-            title_text = f'Pesos del {self.nombre}'
-        
-        fig.update_layout(
-            title=title_text,
-            showlegend=True,
-            width=width,
-            height=height,
-            title_font_size=20,
-            font=dict(size=legend_size),
-            margin=dict(l=50, r=50, t=100, b=50),  # Aumentar margen superior para el subtítulo
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=1.02,
-                font=dict(size=legend_size)
-            )
-        )
-        
-        # Guardar como HTML para abrir en navegador
-        safe_name = self.nombre.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
-        plots_dir = Path(__file__).resolve().parents[1] / 'plots'
-        plots_dir.mkdir(exist_ok=True)
-        out_path = plots_dir / f'portfolio_pastel_{safe_name}.html'
-        fig.write_html(str(out_path))
-        
-        # Mostrar en navegador
-        fig.show()
-        pass
+    
+
 
     def barras(self,pesos):
         tickers = self.data.columns.get_level_values(0).unique().to_list()
