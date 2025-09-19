@@ -587,6 +587,85 @@ class Portafolio:
         fig.write_html(str(out_path))
         fig.show()
 
+    def barras(self, pesos=None, min_weight: float = 0.0):
+        """
+        Grafica barras de los pesos (universo de CONSTRUCCIÓN).
+        - Si `pesos` es None, usa `self.weights`.
+        - Alinea a `self._construct_tickers`; si faltan pesos en una Series, rellena con 0.
+        - Normaliza si la suma != 1. Puede filtrar pesos muy pequeños (min_weight).
+        - Guarda HTML en ./plots/ y muestra en navegador.
+        """
+        construct_tickers = self._construct_tickers or []
+        if not construct_tickers:
+            print("No hay universo de construcción. Llama primero a dividir(...).")
+            return
+
+        # --- obtener / alinear pesos ---
+        if pesos is None:
+            if getattr(self, "weights", None) is None:
+                print("No hay pesos en el objeto. Pasa 'pesos' o llama a construir(...).")
+                return
+            w = np.asarray(self.weights, dtype=float)
+            if len(w) != len(construct_tickers):
+                print("Los pesos guardados no coinciden con el universo de construcción.")
+                return
+            tickers = construct_tickers
+        elif isinstance(pesos, pd.Series):
+            s = pesos.reindex(construct_tickers).fillna(0.0)
+            w = s.values.astype(float)
+            tickers = construct_tickers
+        else:
+            w = np.asarray(pesos, dtype=float)
+            if len(w) != len(construct_tickers):
+                raise ValueError(
+                    f"Length of weights ({len(w)}) debe coincidir con activos de construcción ({len(construct_tickers)})."
+                )
+            tickers = construct_tickers
+
+        # --- limpieza / normalización ---
+        if not np.isfinite(w).all():
+            raise ValueError("Los pesos contienen NaN o Inf.")
+        w[w < 0] = np.maximum(w[w < 0], -1e-12)
+        ssum = w.sum()
+        if ssum == 0:
+            print("Suma de pesos = 0; nada que graficar.")
+            return
+        if not np.isclose(ssum, 1.0, atol=1e-8):
+            w = w / ssum
+
+        # --- filtrar pesos muy pequeños para legibilidad (opcional) ---
+        mask = w > min_weight
+        w_plot = w[mask]
+        t_plot = [t for t, m in zip(tickers, mask) if m]
+
+        # --- gráfico ---
+        fig = go.Figure(data=[go.Bar(
+            x=t_plot,
+            y=w_plot,
+            text=[f'{p:.1%}' for p in w_plot],
+            textposition='auto'
+        )])
+
+        fig.update_layout(
+            title=f'Distribución de Pesos del {self.nombre}',
+            xaxis_title='Activos',
+            yaxis_title='Peso',
+            width=1400,
+            height=700,
+            showlegend=False,
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+
+        # --- guardar y mostrar ---
+        safe_name = self.nombre.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
+        plots_dir = Path.cwd() / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'portfolio_barras_{safe_name}.html'
+        fig.write_html(str(out_path))
+        fig.show()
+
+
     def mc(self,pesos):
         closeprices = self.data.xs('Close', axis=1, level=1)
         logreturns = np.log(closeprices / closeprices.shift(1)).dropna()
@@ -641,41 +720,7 @@ class Portafolio:
     
 
 
-    def barras(self,pesos):
-        tickers = self.data.columns.get_level_values(0).unique().to_list()
-        
-        # Crear gráfico de barras con Plotly
-        fig = go.Figure(data=[go.Bar(
-            x=tickers,
-            y=pesos,
-            marker_color='cornflowerblue',
-            text=[f'{p:.1%}' for p in pesos],
-            textposition='auto'
-        )])
-        
-        fig.update_layout(
-            title=f'Distribución de Pesos del {self.nombre}',
-            xaxis_title='Activos',
-            yaxis_title='Peso',
-            width=1400,
-            height=700,
-            title_font_size=20,
-            xaxis_title_font_size=16,
-            yaxis_title_font_size=16,
-            showlegend=False
-        )
-        
-        # Guardar como HTML
-        safe_name = self.nombre.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
-        plots_dir = Path(__file__).resolve().parents[1] / 'plots'
-        plots_dir.mkdir(exist_ok=True)
-        out_path = plots_dir / f'portfolio_barras_{safe_name}.html'
-        fig.write_html(str(out_path))
-        
-        # Mostrar en navegador
-        fig.show()
-        pass
-
+    
     def bubbleplot_matplotlib(self, weights):
         tickers = self.data.columns.get_level_values(0).unique()
         closeprices = self.data.xs('Close', axis=1, level=1)

@@ -85,6 +85,8 @@ def main():
     print("\n[CHECK] Pastel (top visual):")
     pf.pastel()     
 
+    print("\n[CHECK] Barras:")
+    pf.barras() 
 
 
 
