@@ -44,22 +44,28 @@ class Portafolio:
             raise ValueError(
             "Falta el campo 'Close' en el segundo nivel de columnas."
         )
-        # elementos 
-        self.data: pd.DataFrame = data
+        
+        self.data = data
         self.nombre = nombre
-        # Pesos y métricas (se rellenan tras `construir` o `dividir`)
-        self.weights: np.ndarray | None = None
-        self.expected_returns: pd.Series | None = None
-        self.volatility: pd.Series | None = None
-        self.portfolioreturns: pd.Series | None = None
+        # elementos 
 
-        # sets de datos 
-        self.data_construct: pd.DataFrame | None = None
-        self.data_bt_train: pd.DataFrame | None = None
-        self.data_bt_test: pd.DataFrame | None = None
+        # --- splits de datos ---
+        self.data_construct = None
+        self.data_bt_train  = None
+        self.data_bt_test   = None
 
+        # métricas por tramo (opcional, útil para logging/comparación)
+        self.expected_returns_construct = None
+        self.volatility_construct       = None
+        self.expected_returns_bt_train  = None
+        self.volatility_bt_train        = None
+        self.expected_returns_bt_test   = None
+        self.volatility_bt_test         = None
         # universo base para construcción (para alinear pesos)
         self._construct_tickers: list[str] | None = None
+        #universales 
+        self.weights = None
+        self.portfolioreturns = None
         
     def dividir(self,
                 construct_start: str, construct_end: str,
@@ -77,45 +83,195 @@ class Portafolio:
         self.data_bt_test  = self.data.loc[bt_test_start:bt_test_end] 
         
         # 2) universo de construcción (tickers) y orden canónico
-        self._construct_tickers = (
-            self.data_construct.columns.get_level_values(0).unique().tolist()
-        )
-        # 3) métricas (sobre el set de construcción)
-        self.expected_returns = self.calculate_expected_returns(self.data_construct)
-        self.volatility = self.calculate_volatility(self.data_construct)
-        # tmabién para bt_train
-        self.expected_returns_bt = self.calculate_expected_returns(self.data_bt_train)
-        self.volatility_bt = self.calculate_volatility(self.data_bt_train)
+        if self.data_construct is None or self.data_construct.empty:
+            self._construct_tickers = []
+        else:
+            self._construct_tickers = self.data_construct.columns.get_level_values(0).unique().tolist()
+
+         # 3) métricas por tramo (seguras ante ventanas vacías)
+        def _safe_metrics(df):
+            if df is None or df.empty:
+                return None, None
+            close = df.xs('Close', axis=1, level=1)
+            rets = close.pct_change().dropna()
+            if rets.empty:
+                return None, None
+            return rets.mean(), rets.std()
+
+        self.expected_returns_construct, self.volatility_construct = _safe_metrics(self.data_construct)
+        self.expected_returns_bt_train, self.volatility_bt_train   = _safe_metrics(self.data_bt_train)
+        self.expected_returns_bt_test,  self.volatility_bt_test    = _safe_metrics(self.data_bt_test)
 
         return self.data_construct, self.data_bt_train, self.data_bt_test
 
-    def calculate_expected_returns(self, data):
+    def calculate_expected_returns(self, data: pd.DataFrame) -> pd.Series:
+        """
+        Calcula los **retornos esperados diarios** (promedios) por activo
+        usando precios de cierre del `DataFrame` dado.
+
+        Parámetros
+        ----------
+        data : pd.DataFrame
+            DataFrame con columnas MultiIndex (ticker, campo) y un índice de fechas.
+            Debe contener el campo 'Close' en el nivel 1.
+
+        Returns
+        -------
+        pd.Series
+            Serie con la media de los retornos diarios por activo (índice = tickers).
+            Si `data` está vacío o no hay retornos (una sola fila), devuelve una Serie vacía.
+
+        Notas
+        -----
+        - Usa **retornos aritméticos** (`pct_change()`), no logarítmicos.
+        - La anualización se hace fuera (p. ej., con un helper de KPIs).
+        """
+        if data is None or data.empty:
+            return pd.Series(dtype=float)
+        if "Close" not in data.columns.get_level_values(1):
+            raise ValueError("El DataFrame no contiene el campo 'Close' en sus columnas.")
+
         closeprices = data.xs('Close', axis=1, level=1)
         returns = closeprices.pct_change().dropna()
+        if returns.empty:
+            return pd.Series(dtype=float)
         return returns.mean()
 
-    def calculate_volatility(self, data):
+
+    def calculate_volatility(self, data: pd.DataFrame) -> pd.Series:
+        """
+        Calcula la **volatilidad diaria** (desviación estándar) por activo
+        usando precios de cierre del `DataFrame` dado.
+
+        Parámetros
+        ----------
+        data : pd.DataFrame
+            DataFrame con columnas MultiIndex (ticker, campo) y un índice de fechas.
+            Debe contener el campo 'Close' en el nivel 1.
+
+        Returns
+        -------
+        pd.Series
+            Serie con la desviación estándar de los retornos diarios por activo (índice = tickers).
+            Si `data` está vacío o no hay retornos (una sola fila), devuelve una Serie vacía.
+
+        Notas
+        -----
+        - Usa **retornos aritméticos** (`pct_change()`), no logarítmicos.
+        - La anualización se hace fuera (multiplicando por `sqrt(252)`).
+        """
+        if data is None or data.empty:
+            return pd.Series(dtype=float)
+        if "Close" not in data.columns.get_level_values(1):
+            raise ValueError("El DataFrame no contiene el campo 'Close' en sus columnas.")
+
         closeprices = data.xs('Close', axis=1, level=1)
         returns = closeprices.pct_change().dropna()
+        if returns.empty:
+            return pd.Series(dtype=float)
         return returns.std()
 
+
     def construir(self, pesos):
-        closeprices = self.data.xs('Close', axis=1, level=1)
-        if len(pesos) != len(closeprices.columns):
-            raise ValueError("Length of weights must match number of assets.")
-        self.weights = np.array(pesos)
-        self.portfolio_returns()
+        """
+        Fija los pesos del portafolio y calcula la serie de retornos **solo** sobre el
+        set de construcción (`self.data_construct`), respetando el orden canónico
+        (`self._construct_tickers`).
 
-    def portfolio_returns(self):
-        closeprices = self.data.xs('Close', axis=1, level=1)
-        returns = closeprices.pct_change().dropna()
-        self.portfolioreturns = returns @ self.weights
+        Parámetros
+        ----------
+        pesos : array-like o pd.Series
+            - Si es array-like, se asume el orden de `self._construct_tickers`.
+            - Si es pd.Series, debe estar indexada por los tickers de construcción.
 
-    def portfolio_return(self):
-        closeprices = self.data.xs('Close', axis=1, level=1)
-        returns = closeprices.pct_change().dropna()
-        portfolio_ret = (returns @ self.weights).mean()
-        return portfolio_ret
+        Efectos
+        -------
+        - Valida que exista `data_construct`.
+        - Alinea y normaliza pesos si su suma != 1 (sin cambiar su estructura relativa).
+        - Guarda `self.weights` y compone `self.portfolioreturns` (retornos diarios del portafolio
+        en la ventana de construcción).
+        """
+        # 1) checks básicos
+        if self.data_construct is None or self.data_construct.empty:
+            raise RuntimeError("Primero define los splits con dividir(...): data_construct está vacío.")
+
+        close_construct = self.data_construct.xs('Close', axis=1, level=1)
+        tickers = self._construct_tickers or close_construct.columns.tolist()
+
+        # 2) aceptar array o Series indexada por ticker
+        if isinstance(pesos, pd.Series):
+            w = pesos.reindex(tickers)
+            if w.isna().any():
+                faltan = [t for t, v in w.items() if pd.isna(v)]
+                raise ValueError(f"Faltan pesos para tickers de construcción: {faltan}")
+            w = w.values.astype(float)
+        else:
+            w = np.asarray(pesos, dtype=float)
+            if len(w) != len(tickers):
+                raise ValueError(
+                    f"Length of weights ({len(w)}) must match number of construction assets ({len(tickers)})."
+                )
+
+        # 3) validaciones de numericidad y normalización suave
+        if not np.isfinite(w).all():
+            raise ValueError("Los pesos contienen NaN o Inf.")
+        # tolerancia para negativos microscópicos por redondeo
+        w[w < 0] = np.maximum(w[w < 0], -1e-12)
+        s = w.sum()
+        if s == 0:
+            raise ValueError("La suma de los pesos es 0; no se puede normalizar.")
+        if not np.isclose(s, 1.0, atol=1e-8):
+            w = w / s
+
+        # 4) fijar pesos y calcular la serie de retornos sobre CONSTRUCT
+        self.weights = w
+        rets_construct = close_construct.loc[:, tickers].pct_change().dropna()
+        self.portfolioreturns = rets_construct @ self.weights
+
+        return self.portfolioreturns
+
+
+    def compute_portfolio_returns(self, which: str = "construct"):
+        """
+        Devuelve la SERIE de retornos del portafolio para el tramo indicado.
+        which ∈ {"construct","bt_train","bt_test"}.
+        """
+        if which == "construct":
+            data = self.data_construct
+        elif which == "bt_train":
+            data = self.data_bt_train
+        elif which == "bt_test":
+            data = self.data_bt_test
+        else:
+            raise ValueError("which debe ser 'construct', 'bt_train' o 'bt_test'.")
+
+        if data is None or data.empty:
+            self.portfolioreturns = None
+            return None
+
+        close = data.xs('Close', axis=1, level=1)
+        tickers = self._construct_tickers or close.columns.tolist()
+        rets = close.loc[:, tickers].pct_change().dropna()
+        self.portfolioreturns = rets @ self.weights
+        return self.portfolioreturns
+
+
+    def mean_portfolio_return(self, which: str = "construct", annualize: bool = False, freq: int = 252):
+        """
+        Devuelve el PROMEDIO de los retornos (diario por defecto) del portafolio.
+        Si annualize=True, devuelve el retorno anualizado.
+        """
+        rs = self.portfolioreturns
+        # si la serie aún no está calculada o el tramo cambió, la calculamos
+        if rs is None:
+            rs = self.compute_portfolio_returns(which)
+        if rs is None or rs.empty:
+            return None
+
+        mean_daily = rs.mean()
+        if not annualize:
+            return mean_daily
+        return (1 + mean_daily)**freq - 1
 
     def portfolio_volatility(self):
         closeprices = self.data.xs('Close', axis=1, level=1)
