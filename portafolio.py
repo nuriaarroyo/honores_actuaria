@@ -273,11 +273,45 @@ class Portafolio:
             return mean_daily
         return (1 + mean_daily)**freq - 1
 
-    def portfolio_volatility(self):
-        closeprices = self.data.xs('Close', axis=1, level=1)
-        returns = closeprices.pct_change().dropna()
-        portfolio_vol = (returns @ self.weights).std()
-        return portfolio_vol
+    def portfolio_volatility(self, which: str = "construct", annualize: bool = False, freq: int = 252):
+        """
+        Devuelve la volatilidad (desviación estándar) de la SERIE de retornos del portafolio
+        para el tramo indicado.
+
+        Parámetros
+        ----------
+        which : {"construct","bt_train","bt_test"}
+            Tramo sobre el que calcular la volatilidad.
+        annualize : bool
+            Si True, devuelve volatilidad anualizada (σ_diaria * sqrt(freq)).
+        freq : int
+            Frecuencia de trading para anualizar (por defecto 252).
+
+        Returns
+        -------
+        float | None
+            Volatilidad (diaria o anualizada). Devuelve None si la serie está vacía.
+        """
+        # Asegurar que la serie de retornos del tramo esté disponible
+        rs = self.portfolioreturns
+        if rs is None:
+            rs = self.compute_portfolio_returns(which)
+        else:
+            # Si la serie existente no corresponde al tramo pedido, recalcular
+            # (opcional: puedes guardar un flag del tramo actual si quieres ser estricto)
+            if rs is None or rs.empty:
+                rs = self.compute_portfolio_returns(which)
+
+        if rs is None or rs.empty:
+            return None
+
+        vol = rs.std()
+        if annualize:
+            vol *= np.sqrt(freq)
+        return float(vol)
+
+
+
 
     def mc(self,pesos):
         closeprices = self.data.xs('Close', axis=1, level=1)
