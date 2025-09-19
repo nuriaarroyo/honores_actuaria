@@ -665,6 +665,138 @@ class Portafolio:
         fig.write_html(str(out_path))
         fig.show()
 
+    def bubbleplot(self, pesos=None, min_weight: float = 0.0):
+        """
+        Bubble plot (Plotly) de Rendimiento esperado vs Volatilidad por ACTIVO,
+        usando el universo de CONSTRUCCIÓN. El tamaño de cada burbuja es el peso.
+
+        Parámetros
+        ----------
+        pesos : array-like | pd.Series | None
+            - None: usa self.weights (después de construir).
+            - array-like: se asume el orden de self._construct_tickers.
+            - pd.Series: se reindexa a self._construct_tickers; faltantes -> 0 (p. ej. Markowitz).
+        min_weight : float
+            Umbral para filtrar pesos muy pequeños (no se muestran).
+
+        Efectos
+        -------
+        - Calcula ER y VOL por activo en la ventana de construcción.
+        - Alinea pesos y métricas al universo de construcción.
+        - Normaliza pesos si la suma != 1.
+        - Guarda el HTML en ./plots/bubble_plot_{nombre}.html y abre la figura.
+        """
+        # --- universo de construcción ---
+        construct_tickers = self._construct_tickers or []
+        if not construct_tickers:
+            print("No hay universo de construcción. Llama primero a dividir(...).")
+            return
+
+        if self.data_construct is None or self.data_construct.empty:
+            print("data_construct está vacío. Revisa tus fechas.")
+            return
+
+        # --- métricas por activo en CONSTRUCT ---
+        close = self.data_construct.xs('Close', axis=1, level=1)
+        # asegurar columnas en el mismo orden del universo
+        cols = [c for c in construct_tickers if c in close.columns]
+        if not cols:
+            print("No hay intersección de tickers entre construct y datos de cierre.")
+            return
+
+        rets = close.loc[:, cols].pct_change().dropna()
+        if rets.empty:
+            print("No hay retornos en la ventana de construcción (muy pocos datos).")
+            return
+
+        ereturns = rets.mean()      # pd.Series index=tickers
+        vols     = rets.std()       # pd.Series index=tickers
+
+        # --- obtener / alinear pesos ---
+        if pesos is None:
+            if getattr(self, "weights", None) is None:
+                print("No hay pesos en el objeto. Pasa 'pesos' o llama a construir(...).")
+                return
+            w = np.asarray(self.weights, dtype=float)
+            if len(w) != len(construct_tickers):
+                print("Los pesos guardados no coinciden con el universo de construcción.")
+                return
+            w = pd.Series(w, index=construct_tickers)
+        elif isinstance(pesos, pd.Series):
+            # reindex a universo de construcción; faltantes = 0
+            w = pesos.reindex(construct_tickers).fillna(0.0).astype(float)
+        else:
+            w_arr = np.asarray(pesos, dtype=float)
+            if len(w_arr) != len(construct_tickers):
+                raise ValueError(
+                    f"Length of weights ({len(w_arr)}) debe coincidir con activos de construcción ({len(construct_tickers)})."
+                )
+            w = pd.Series(w_arr, index=construct_tickers)
+
+        # limpieza / normalización
+        if not np.isfinite(w.values).all():
+            raise ValueError("Los pesos contienen NaN o Inf.")
+        w[w < 0] = np.maximum(w[w < 0], -1e-12)
+        ssum = float(w.sum())
+        if ssum == 0:
+            print("Suma de pesos = 0; nada que graficar.")
+            return
+        if not np.isclose(ssum, 1.0, atol=1e-8):
+            w = w / ssum
+
+        # --- alinear ER/VOL a universo y filtrar por min_weight ---
+        ereturns = ereturns.reindex(construct_tickers)
+        vols     = vols.reindex(construct_tickers)
+
+        mask = w.values > float(min_weight)
+        if not mask.any():
+            print(f"Todos los pesos son ≤ {min_weight:.4f}; nada que graficar.")
+            return
+        w_plot   = w.values[mask]
+        x_plot   = ereturns.values[mask]
+        y_plot   = vols.values[mask]
+        labels   = np.array(construct_tickers)[mask]
+
+        # --- tamaños de burbuja (escala suave) ---
+        # raíz para que no dominen los grandes; escala automática por cantidad
+        n_pts = len(w_plot)
+        base_scale = 1800 if n_pts <= 25 else (1400 if n_pts <= 60 else 1000)
+        sizes = np.maximum(8.0, np.sqrt(w_plot) * base_scale)  # mínimo visible 8
+
+        # --- figura plotly ---
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=x_plot, y=y_plot,
+            mode='markers+text' if n_pts <= 25 else 'markers',
+            marker=dict(
+                size=sizes,
+                opacity=0.7,
+                line=dict(color='black', width=1)
+            ),
+            text=labels if n_pts <= 25 else None,
+            textposition='middle center',
+            hovertemplate="<b>%{text}</b><br>ER: %{x:.4f}<br>VOL: %{y:.4f}<br>Peso: %{customdata:.2%}<extra></extra>",
+            customdata=w_plot,
+            name='Activos'
+        ))
+
+        fig.update_layout(
+            title=f'Bubble Plot: Returns vs Volatility - {self.nombre}',
+            xaxis_title='Expected Returns (diario)',
+            yaxis_title='Volatility (diaria)',
+            width=1200, height=900,
+            showlegend=False,
+            plot_bgcolor='white', paper_bgcolor='white'
+        )
+
+        # --- guardar y mostrar ---
+        safe_name = self.nombre.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
+        plots_dir = Path.cwd() / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'bubble_plot_{safe_name}.html'
+        fig.write_html(str(out_path))
+        fig.show()
+
 
     def mc(self,pesos):
         closeprices = self.data.xs('Close', axis=1, level=1)

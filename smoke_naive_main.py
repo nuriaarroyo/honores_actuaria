@@ -88,6 +88,8 @@ def main():
     print("\n[CHECK] Barras:")
     pf.barras() 
 
+    print("\n[CHECK] Bubble plot:")
+    pf.bubbleplot()  # usa self.weights y data_construct
 
 
 if __name__ == "__main__":
