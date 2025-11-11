@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from portafolio import Portafolio
-from naive import NaivePortafolio  # hereda Portafolio con tus cambios
+from original.portafolio import Portafolio
+from original.naive import NaivePortafolio  # hereda Portafolio con tus cambios
 
 def main():
     # 1) cargar datos
