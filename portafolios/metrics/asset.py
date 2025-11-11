@@ -29,3 +29,18 @@ def volatility(returns: pd.DataFrame, ann_factor: Optional[int] = None, ddof: in
     """
     sigma = returns.std(ddof=ddof)
     return sigma if ann_factor is None else sigma * np.sqrt(ann_factor)
+def covariance_matrix(returns: pd.DataFrame, ann_factor: Optional[int] = None, ddof: int = 1) -> pd.DataFrame:
+    """
+    Matriz de covarianzas entre activos.
+    - Si ann_factor is None → per-period covariance.
+    - Si ann_factor es int  → anualiza: cov * ann_factor.
+    """
+    cov = returns.cov(ddof=ddof)
+    return cov if ann_factor is None else cov * ann_factor
+
+
+def correlation_matrix(returns: pd.DataFrame) -> pd.DataFrame:
+    """
+    Matriz de correlaciones entre activos (adimensional).
+    """
+    return returns.corr()
